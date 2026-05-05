@@ -90,6 +90,24 @@ Each VNET protected by Azure DDoS Protection covers all public IPs in that VNET 
 - **Not connected:** Run `Get-AzContext`
 - **Module missing:** `Install-Module ImportExcel -Scope CurrentUser -Force`
 - **Empty results:** Verify read permissions on Network resources
+- **Script blocked / not digitally signed:** If PowerShell reports `PSSecurityException` or says the script is not digitally signed, use one of these options:
+
+```powershell
+# Option 1: Allow local scripts for your user profile
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+```powershell
+# Option 2: Allow this session only
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+```powershell
+# Option 3: Unblock a downloaded script file
+Unblock-File .\Export-PublicIPs.ps1
+```
+
+After applying one of the options above, run the script again.
 
 ## Security
 
