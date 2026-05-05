@@ -17,23 +17,74 @@
 #   Excel file with columns: IP Address, VNET, Subnet, Resource Group, Associated Resource, Type, SKU, etc.
 #   Formatted as a table with auto-filter for easy analysis.
 
+[CmdletBinding()]
+param(
+    [Parameter(HelpMessage = "Scan all accessible subscriptions in the specified tenant.")]
+    [string]$TenantId,
+
+    [Parameter(HelpMessage = "Scan one or more specific subscriptions.")]
+    [string[]]$SubscriptionId
+)
+
 # ============================================================================
 # Configuration
 # ============================================================================
 
-# Get current context — uses the subscription you set with Set-AzContext
 $context = Get-AzContext
 if (-not $context) {
     Write-Host "ERROR: Not connected to Azure. Run Connect-AzAccount first." -ForegroundColor Red
     exit 1
 }
 
-$subscriptionId = $context.Subscription.Id
-$subscriptionName = $context.Subscription.Name
+if ($TenantId) {
+    $tenantSubscriptions = @(Get-AzSubscription -TenantId $TenantId -ErrorAction Stop)
+
+    if ($SubscriptionId) {
+        $requestedSubscriptionIds = @($SubscriptionId | Select-Object -Unique)
+        $targetSubscriptions = @($tenantSubscriptions | Where-Object { $_.Id -in $requestedSubscriptionIds })
+        $missingSubscriptionIds = @($requestedSubscriptionIds | Where-Object { $_ -notin $targetSubscriptions.Id })
+
+        if ($missingSubscriptionIds.Count -gt 0) {
+            Write-Host "ERROR: The following subscriptions were not found in tenant '$TenantId': $($missingSubscriptionIds -join ', ')" -ForegroundColor Red
+            exit 1
+        }
+    }
+    else {
+        $targetSubscriptions = $tenantSubscriptions
+    }
+}
+elseif ($SubscriptionId) {
+    $targetSubscriptions = foreach ($id in ($SubscriptionId | Select-Object -Unique)) {
+        Get-AzSubscription -SubscriptionId $id -ErrorAction Stop
+    }
+}
+else {
+    $targetSubscriptions = @(
+        [PSCustomObject]@{
+            Id   = $context.Subscription.Id
+            Name = $context.Subscription.Name
+        }
+    )
+}
+
+if (-not $targetSubscriptions -or $targetSubscriptions.Count -eq 0) {
+    Write-Host "ERROR: No accessible subscriptions were found for the requested scope." -ForegroundColor Red
+    exit 1
+}
+
+$targetSubscriptions = @($targetSubscriptions | Sort-Object Name)
+
+$subLookup = @{}
+foreach ($sub in $targetSubscriptions) {
+    $subLookup[$sub.Id] = $sub.Name
+}
 
 $outputFile = "PublicIPs_Inventory_$(Get-Date -Format 'yyyyMMdd_HHmm').xlsx"
 
-Write-Host "Connected to: $subscriptionName ($subscriptionId)" -ForegroundColor Green
+Write-Host "Scanning $($targetSubscriptions.Count) subscription(s)" -ForegroundColor Green
+foreach ($sub in $targetSubscriptions) {
+    Write-Host "  - $($sub.Name) ($($sub.Id))" -ForegroundColor DarkGray
+}
 
 # ============================================================================
 # Module Checks
@@ -72,7 +123,7 @@ function Invoke-ArgQuery {
         $all += $response
         $skipToken = $response.SkipToken
         
-        Write-Host "  Page $pageCount: $($response.Count) records" -ForegroundColor DarkGray
+        Write-Host "  Page ${pageCount}: $($response.Count) records" -ForegroundColor DarkGray
     } while ($skipToken)
     
     return $all
@@ -85,39 +136,52 @@ function Invoke-ArgQuery {
 Write-Host "`nQuerying Azure Resource Graph..." -ForegroundColor Cyan
 
 Write-Host "  1. Public IPs..." -ForegroundColor White
-$pips = Invoke-ArgQuery `
-    "resources | where type =~ 'microsoft.network/publicipaddresses' | project pipId = tolower(id), resourceName = name, resourceGroup, subscriptionId, location, ipAddress = tostring(properties.ipAddress), sku = tostring(sku.name), allocationMethod = tostring(properties.publicIPAllocationMethod), ipVersion = tostring(properties.publicIPAddressVersion), dnsLabel = tostring(properties.dnsSettings.fqdn), provisioningState = tostring(properties.provisioningState), tags" `
-    $subscriptionId
+$pips = foreach ($sub in $targetSubscriptions) {
+    Write-Host "    [$($sub.Name)]" -ForegroundColor DarkGray
+    Invoke-ArgQuery `
+        "resources | where type =~ 'microsoft.network/publicipaddresses' | project pipId = tolower(id), resourceName = name, resourceGroup, subscriptionId, location, ipAddress = tostring(properties.ipAddress), sku = tostring(sku.name), allocationMethod = tostring(properties.publicIPAllocationMethod), ipVersion = tostring(properties.publicIPAddressVersion), dnsLabel = tostring(properties.dnsSettings.fqdn), provisioningState = tostring(properties.provisioningState), tags" `
+        $sub.Id
+}
 
 Write-Host "  2. NIC associations (VMs)..." -ForegroundColor White
-$nics = Invoke-ArgQuery `
-    "resources | where type =~ 'microsoft.network/networkinterfaces' | mv-expand ipConfig = properties.ipConfigurations | extend pipId = tolower(tostring(ipConfig.properties.publicIPAddress.id)) | extend subnetId = tostring(ipConfig.properties.subnet.id) | where isnotempty(pipId) | parse subnetId with * '/virtualNetworks/' vnetName '/subnets/' subnetName | project pipId, associatedResource = name, associationType = 'NIC (VM)', vnetName, subnetName" `
-    $subscriptionId
+$nics = foreach ($sub in $targetSubscriptions) {
+    Write-Host "    [$($sub.Name)]" -ForegroundColor DarkGray
+    Invoke-ArgQuery `
+        "resources | where type =~ 'microsoft.network/networkinterfaces' | mv-expand ipConfig = properties.ipConfigurations | extend pipId = tolower(tostring(ipConfig.properties.publicIPAddress.id)) | extend subnetId = tostring(ipConfig.properties.subnet.id) | where isnotempty(pipId) | parse subnetId with * '/virtualNetworks/' vnetName '/subnets/' subnetName | project pipId, associatedResource = name, associationType = 'NIC (VM)', vnetName, subnetName" `
+        $sub.Id
+}
 
 Write-Host "  3. Azure Firewall associations..." -ForegroundColor White
-$fws = Invoke-ArgQuery `
-    "resources | where type =~ 'microsoft.network/azurefirewalls' | mv-expand ipConfig = properties.ipConfigurations | extend pipId = tolower(tostring(ipConfig.properties.publicIPAddress.id)) | extend subnetId = tostring(ipConfig.properties.subnet.id) | where isnotempty(pipId) | parse subnetId with * '/virtualNetworks/' vnetName '/subnets/' subnetName | project pipId, associatedResource = name, associationType = 'Azure Firewall', vnetName, subnetName" `
-    $subscriptionId
+$fws = foreach ($sub in $targetSubscriptions) {
+    Write-Host "    [$($sub.Name)]" -ForegroundColor DarkGray
+    Invoke-ArgQuery `
+        "resources | where type =~ 'microsoft.network/azurefirewalls' | mv-expand ipConfig = properties.ipConfigurations | extend pipId = tolower(tostring(ipConfig.properties.publicIPAddress.id)) | extend subnetId = tostring(ipConfig.properties.subnet.id) | where isnotempty(pipId) | parse subnetId with * '/virtualNetworks/' vnetName '/subnets/' subnetName | project pipId, associatedResource = name, associationType = 'Azure Firewall', vnetName, subnetName" `
+        $sub.Id
+}
 
 Write-Host "  4. Bastion associations..." -ForegroundColor White
-$bastions = Invoke-ArgQuery `
-    "resources | where type =~ 'microsoft.network/bastionhosts' | mv-expand ipConfig = properties.ipConfigurations | extend pipId = tolower(tostring(ipConfig.properties.publicIPAddress.id)) | extend subnetId = tostring(ipConfig.properties.subnet.id) | where isnotempty(pipId) | parse subnetId with * '/virtualNetworks/' vnetName '/subnets/' subnetName | project pipId, associatedResource = name, associationType = 'Bastion', vnetName, subnetName" `
-    $subscriptionId
+$bastions = foreach ($sub in $targetSubscriptions) {
+    Write-Host "    [$($sub.Name)]" -ForegroundColor DarkGray
+    Invoke-ArgQuery `
+        "resources | where type =~ 'microsoft.network/bastionhosts' | mv-expand ipConfig = properties.ipConfigurations | extend pipId = tolower(tostring(ipConfig.properties.publicIPAddress.id)) | extend subnetId = tostring(ipConfig.properties.subnet.id) | where isnotempty(pipId) | parse subnetId with * '/virtualNetworks/' vnetName '/subnets/' subnetName | project pipId, associatedResource = name, associationType = 'Bastion', vnetName, subnetName" `
+        $sub.Id
+}
 
 Write-Host "  5. NAT Gateway associations..." -ForegroundColor White
-$natgws = Invoke-ArgQuery `
-    "resources | where type =~ 'microsoft.network/natgateways' | mv-expand pip = properties.publicIpAddresses | mv-expand sn = properties.subnets | extend pipId = tolower(tostring(pip.id)) | extend subnetId = tostring(sn.id) | where isnotempty(pipId) | parse subnetId with * '/virtualNetworks/' vnetName '/subnets/' subnetName | project pipId, associatedResource = name, associationType = 'NAT Gateway', vnetName, subnetName" `
-    $subscriptionId
+$natgws = foreach ($sub in $targetSubscriptions) {
+    Write-Host "    [$($sub.Name)]" -ForegroundColor DarkGray
+    Invoke-ArgQuery `
+        "resources | where type =~ 'microsoft.network/natgateways' | mv-expand pip = properties.publicIpAddresses | mv-expand sn = properties.subnets | extend pipId = tolower(tostring(pip.id)) | extend subnetId = tostring(sn.id) | where isnotempty(pipId) | parse subnetId with * '/virtualNetworks/' vnetName '/subnets/' subnetName | project pipId, associatedResource = name, associationType = 'NAT Gateway', vnetName, subnetName" `
+        $sub.Id
+}
 
 Write-Host "  6. Application Gateway associations..." -ForegroundColor White
-$agws = Invoke-ArgQuery `
-    "resources | where type =~ 'microsoft.network/applicationgateways' | mv-expand fe = properties.frontendIPConfigurations | mv-expand gw = properties.gatewayIPConfigurations | extend pipId = tolower(tostring(fe.properties.publicIPAddress.id)) | extend subnetId = tostring(gw.properties.subnet.id) | where isnotempty(pipId) | parse subnetId with * '/virtualNetworks/' vnetName '/subnets/' subnetName | project pipId, associatedResource = name, associationType = 'Application Gateway', vnetName, subnetName" `
-    $subscriptionId
-
-Write-Host "  7. Subscription details..." -ForegroundColor White
-$subs = Invoke-ArgQuery `
-    "resourcecontainers | where type =~ 'microsoft.resources/subscriptions' | project subscriptionId, subscriptionName = name" `
-    $subscriptionId
+$agws = foreach ($sub in $targetSubscriptions) {
+    Write-Host "    [$($sub.Name)]" -ForegroundColor DarkGray
+    Invoke-ArgQuery `
+        "resources | where type =~ 'microsoft.network/applicationgateways' | mv-expand fe = properties.frontendIPConfigurations | mv-expand gw = properties.gatewayIPConfigurations | extend pipId = tolower(tostring(fe.properties.publicIPAddress.id)) | extend subnetId = tostring(gw.properties.subnet.id) | where isnotempty(pipId) | parse subnetId with * '/virtualNetworks/' vnetName '/subnets/' subnetName | project pipId, associatedResource = name, associationType = 'Application Gateway', vnetName, subnetName" `
+        $sub.Id
+}
 
 # ============================================================================
 # Join Data in PowerShell
@@ -129,9 +193,6 @@ $assocLookup = @{}
 foreach ($row in @($nics) + @($fws) + @($bastions) + @($natgws) + @($agws)) {
     if ($row.pipId) { $assocLookup[$row.pipId] = $row }
 }
-
-$subLookup = @{}
-foreach ($row in $subs) { $subLookup[$row.subscriptionId] = $row.subscriptionName }
 
 $results = foreach ($pip in $pips) {
     $assoc = $assocLookup[$pip.pipId]

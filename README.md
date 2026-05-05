@@ -1,6 +1,6 @@
 # Azure Public IP Inventory
 
-Export a comprehensive inventory of all Azure public IPs across your subscription to Excel, including VNET associations, resource types, SKU details, and allocation methods. Designed for Azure DDoS Protection Network Protection planning and compliance auditing.
+Export a comprehensive inventory of all Azure public IPs across one subscription, multiple subscriptions, or every accessible subscription in a tenant to Excel, including VNET associations, resource types, SKU details, and allocation methods. Designed for Azure DDoS Protection Network Protection planning and compliance auditing.
 
 ## Features
 
@@ -36,10 +36,40 @@ Install-Module ImportExcel -Scope CurrentUser -Force
 
 ## Usage
 
+Single current-context subscription:
+
 ```powershell
 Connect-AzAccount
 Set-AzContext -Subscription "subscription-id"
 .\Export-PublicIPs.ps1
+```
+
+Single explicit subscription:
+
+```powershell
+Connect-AzAccount
+.\Export-PublicIPs.ps1 -SubscriptionId "subscription-id"
+```
+
+Multiple explicit subscriptions:
+
+```powershell
+Connect-AzAccount
+.\Export-PublicIPs.ps1 -SubscriptionId "sub-1","sub-2"
+```
+
+All accessible subscriptions in a tenant:
+
+```powershell
+Connect-AzAccount -TenantId "tenant-id"
+.\Export-PublicIPs.ps1 -TenantId "tenant-id"
+```
+
+Tenant scope filtered to specific subscriptions:
+
+```powershell
+Connect-AzAccount -TenantId "tenant-id"
+.\Export-PublicIPs.ps1 -TenantId "tenant-id" -SubscriptionId "sub-1","sub-2"
 ```
 
 Output: `PublicIPs_Inventory_YYYYMMDD_HHMM.xlsx`
