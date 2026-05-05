@@ -1,0 +1,25 @@
+# PowerShell output
+*.csv
+*.xlsx
+*.log
+
+# Azure credentials
+**/az.json
+**/tokenCache.json
+.azure/
+
+# IDE
+.vscode/
+.vs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node/npm (if you use it)
+node_modules/
+package-lock.json
+
+# Python (if you use it)
+__pycache__/
+*.pyc
